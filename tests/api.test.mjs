@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHrApi } from '../src/api.js';
 import XLSX from 'xlsx-js-style';
 import { parseSkudWorkbook } from '../src/services/timesheet-xlsx.js';
+import { analyzeEmployeeWorkbook, parseEmployeeWorkbook } from '../src/services/employee-import.js';
 
 class MemoryDatabase {
   constructor() { this.mode = 'preview'; this.label = 'test'; this.records = new Map(); this.meta = new Map(); }
@@ -28,7 +29,7 @@ async function app() {
 test('предпросмотр загружается с тремя активными модулями', async () => {
   const { api } = await app();
   const bootstrap = await api.handle('bootstrap');
-  assert.equal(bootstrap.app.version, '2.1.0');
+  assert.equal(bootstrap.app.version, '2.2.0');
   assert.deepEqual(bootstrap.permissions.activeModules, ['hr', 'offers', 'timesheet']);
   assert.deepEqual(bootstrap.permissions.modules, ['hr', 'offers', 'timesheet']);
   assert.equal(bootstrap.actor.role, 'HRD');
@@ -126,4 +127,54 @@ test('импорт СКУД понимает заголовки вида «1 + �
   assert.equal(parsed.sourceRows, 1);
   assert.deepEqual(parsed.rows.map(row => row.date), ['2026-07-01', '2026-07-03', '2026-07-05']);
   assert.ok(parsed.rows.every(row => row.fullName === 'Иванов Иван Иванович'));
+});
+
+test('импорт сотрудников распознает колонки, показывает изменения и пишет журнал', async () => {
+  const matrix = [
+    ['Кадровый реестр'],
+    ['Employee ID', 'ФИО', 'Подразделение', 'Должность', 'Дата приема', 'Дата выхода', 'Дата увольнения', 'Статус', 'Табельный номер', 'Руководитель'],
+    ['ST-0002', 'Примеров Алексей Петрович', 'Отдел продаж поликарбоната', 'Старший менеджер', '01.08.2026', '05.08.2026', '', 'Работает', '0002', 'Примерова Анна Игоревна'],
+    ['ST-0003', 'Учебная Елена Олеговна', 'Финансовый отдел', 'Главный бухгалтер', '10.03.2021', '15.03.2021', '30.09.2026', 'Уволен', '0003', 'Демонстрационная Наталья Сергеевна'],
+    ['EXT-100', 'Новый Петр Иванович', 'Склад', 'Кладовщик', '10.09.2026', '12.09.2026', '', 'Работает', '0101', 'Демонстрационная Наталья Сергеевна']
+  ];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(matrix), 'Сотрудники');
+  const base64 = XLSX.write(workbook, { type: 'base64', bookType: 'xlsx' });
+  const analysis = analyzeEmployeeWorkbook(base64);
+  assert.equal(analysis.sheetName, 'Сотрудники');
+  assert.equal(analysis.headerRow, 2);
+  assert.equal(analysis.suggestedMapping.fullName, 'c1');
+  const parsed = parseEmployeeWorkbook(base64, { mapping: analysis.suggestedMapping });
+  assert.equal(parsed.rows[1].record.dismissalDate, '2026-09-30');
+
+  const { api, db } = await app();
+  await api.handle('bootstrap');
+  const preview = await api.handle('employees.import.preview', { fileName: 'Кадровый реестр.xlsx', base64, sheetName: analysis.sheetName, mapping: analysis.suggestedMapping });
+  assert.equal(preview.counts.create, 1);
+  assert.equal(preview.counts.dismiss, 1);
+  assert.equal(preview.counts.update, 1);
+  const result = await api.handle('employees.import.commit', { fileName: preview.fileName, sheetName: preview.sheetName, mapping: preview.mapping, items: preview.items });
+  assert.equal(result.created, 1);
+  assert.equal(result.dismissed, 1);
+  assert.equal((await db.get('employees', 'ST-0003')).status, 'Уволен');
+  assert.equal((await db.get('employees', 'EXT-100')).department, 'Склад');
+  assert.equal((await db.list('employee_imports')).length, 1);
+  assert.equal((await db.list('employee_import_rows')).length, 3);
+  assert.ok((await db.list('directory_items')).some(item => item.type === 'Подразделение' && item.value === 'Склад'));
+});
+
+test('импорт сотрудников блокирует неоднозначное ФИО без идентификатора', async () => {
+  const matrix = [
+    ['ФИО', 'Подразделение', 'Должность'],
+    ['Одинаков Иван Иванович', 'Склад', 'Кладовщик'],
+    ['Одинаков Иван Иванович', 'Склад', 'Старший кладовщик']
+  ];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(matrix), 'Лист1');
+  const base64 = XLSX.write(workbook, { type: 'base64', bookType: 'xlsx' });
+  const { api } = await app();
+  await api.handle('bootstrap');
+  const preview = await api.handle('employees.import.preview', { fileName: 'Дубли.xlsx', base64 });
+  assert.equal(preview.counts.conflict, 2);
+  await assert.rejects(() => api.handle('employees.import.commit', { fileName: preview.fileName, items: preview.items }), /Не выбрана ни одна строка/);
 });

@@ -22,6 +22,7 @@ const daysBetween = (from, to = todayIso()) => { const start = parseDate(from); 
 const unique = values => [...new Set(values.filter(Boolean))];
 const average = values => values.length ? Math.round(values.reduce((sum, value) => sum + Number(value || 0), 0) / values.length * 10) / 10 : 0;
 const normalizeFullName = value => String(value || '').toLocaleLowerCase('ru-RU').replace(/ё/g, 'е').replace(/[^a-zа-я0-9\s-]/gi, ' ').replace(/\s+/g, ' ').trim();
+const EMPLOYEE_IMPORT_LABELS = { fullName: 'ФИО', department: 'Подразделение', position: 'Должность', location: 'Локация', hireDate: 'Дата приема', plannedStartDate: 'Плановая дата выхода', startDate: 'Дата фактического выхода', dismissalDate: 'Дата увольнения', status: 'Статус сотрудника', dismissalReason: 'Причина увольнения', managerId: 'Руководитель', managerName: 'ФИО руководителя', email: 'Email', phone: 'Телефон', employmentType: 'Тип занятости', workFormat: 'Формат работы', fte: 'FTE / ставка', timesheetNumber: 'Табельный номер', timesheetIncluded: 'Учитывать в табеле' };
 
 function nextId(prefix, rows, field, width = 4) {
   const max = rows.reduce((value, row) => {
@@ -61,7 +62,7 @@ function recordId(entity, payload) {
     adaptations: 'adaptId', adaptation_templates: 'templateId', learning: 'learningId', surveys: 'responseId', documents: 'documentId', notifications: 'notificationId',
     work_calendar: 'date', review: 'reviewId', timesheet_codes: 'code', timesheet_access: 'accessId', timesheet_entries: 'entryId', timesheet_periods: 'periodId',
     skud_imports: 'importId', timesheet_differences: 'differenceId', skud_controls: 'issueId',
-    offers: 'offerId', offer_motivation_versions: 'versionId', offer_events: 'eventId'
+    offers: 'offerId', offer_motivation_versions: 'versionId', offer_events: 'eventId', employee_imports: 'importId', employee_import_rows: 'rowId'
   };
   return clean(payload[fields[entity] || 'id']);
 }
@@ -190,7 +191,7 @@ export function createHrApi(db) {
   async function bootstrap(actor) {
     const perms = await permissions(actor);
     const notices = await notifications(actor);
-    return { app: { name: 'HR Строяков', version: '2.1.0', runtime: db.mode }, actor, permissions: perms, references: await references(), notificationCount: notices.notifications.length, migration: { migrated: true, source: db.mode } };
+    return { app: { name: 'HR Строяков', version: '2.2.0', runtime: db.mode }, actor, permissions: perms, references: await references(), notificationCount: notices.notifications.length, migration: { migrated: true, source: db.mode } };
   }
 
   async function notifications(actor) {
@@ -228,6 +229,182 @@ export function createHrApi(db) {
     const payload = enrichEmployee({ ...old, ...form, employeeId: id, fullName: [form.surname, form.name, form.patronymic].filter(Boolean).join(' '), managerName: manager?.fullName || '', mentorName: mentor?.fullName || '', fte: num(form.fte) || 1, individualProbationDays: num(form.individualProbationDays), timesheetIncluded, timesheetExclusionStatus: timesheetIncluded ? 'Не требуется' : (old?.timesheetIncluded === false && old?.timesheetExclusionStatus === 'Подтверждено' ? 'Подтверждено' : 'Требует подтверждения'), status: old?.status || 'Работает', updatedAt: new Date().toISOString() });
     await save('employees', payload);
     return payload;
+  }
+
+  function groupedBy(rows, selector) {
+    return rows.reduce((map, row) => {
+      const key = clean(selector(row));
+      if (!key) return map;
+      const list = map.get(key) || [];
+      list.push(row);
+      map.set(key, list);
+      return map;
+    }, new Map());
+  }
+
+  function importedValue(value) {
+    return value !== '' && value !== null && value !== undefined;
+  }
+
+  function employeeChanges(before, after) {
+    const fields = ['fullName', 'department', 'position', 'location', 'hireDate', 'plannedStartDate', 'startDate', 'dismissalDate', 'status', 'dismissalReason', 'managerId', 'managerName', 'email', 'phone', 'employmentType', 'workFormat', 'fte', 'timesheetNumber', 'timesheetIncluded'];
+    return fields.filter(field => String(before?.[field] ?? '') !== String(after?.[field] ?? '')).map(field => ({ field, label: EMPLOYEE_IMPORT_LABELS[field] || field, before: before?.[field] ?? '', after: after?.[field] ?? '' }));
+  }
+
+  function importActionLabel(action) {
+    return ({ create: 'Создать', update: 'Обновить', dismiss: 'Уволить', unchanged: 'Без изменений', conflict: 'Требует проверки', error: 'Ошибка' })[action] || action;
+  }
+
+  async function analyzeEmployeeImport(actor, payload) {
+    await assertManage(actor);
+    const { analyzeEmployeeWorkbook } = await import('./services/employee-import.js');
+    const analysis = analyzeEmployeeWorkbook(payload.base64, payload.sheetName || '');
+    return { ...analysis, fileName: clean(payload.fileName) };
+  }
+
+  async function previewEmployeeImport(actor, payload) {
+    await assertManage(actor);
+    const { parseEmployeeWorkbook } = await import('./services/employee-import.js');
+    const parsed = parseEmployeeWorkbook(payload.base64, { sheetName: payload.sheetName, mapping: payload.mapping });
+    const employees = await allEmployees();
+    const byId = groupedBy(employees, employee => employee.employeeId);
+    const byNumber = groupedBy(employees, employee => clean(employee.timesheetNumber));
+    const byName = groupedBy(employees, employee => normalizeFullName(employee.fullName));
+    const inputIds = groupedBy(parsed.rows, row => row.record.employeeId);
+    const inputNumbers = groupedBy(parsed.rows, row => row.record.timesheetNumber);
+    const weakInputNames = groupedBy(parsed.rows.filter(row => !row.record.employeeId && !row.record.timesheetNumber), row => normalizeFullName(row.record.fullName));
+    const reservedIds = new Set(employees.map(employee => employee.employeeId));
+    let generated = employees.reduce((max, employee) => {
+      const match = clean(employee.employeeId).match(/(\d+)$/);
+      return Math.max(max, match ? Number(match[1]) : 0);
+    }, 0);
+    const nextEmployeeId = () => {
+      let id;
+      do { generated += 1; id = `ST-${String(generated).padStart(4, '0')}`; } while (reservedIds.has(id));
+      reservedIds.add(id);
+      return id;
+    };
+
+    const items = parsed.rows.map(source => {
+      const record = source.record;
+      const errors = [...source.errors];
+      const warnings = [];
+      if (record.employeeId && (inputIds.get(record.employeeId) || []).length > 1) errors.push(`Employee ID ${record.employeeId} повторяется в файле.`);
+      if (record.timesheetNumber && (inputNumbers.get(record.timesheetNumber) || []).length > 1) errors.push(`Табельный номер ${record.timesheetNumber} повторяется в файле.`);
+      if (!record.employeeId && !record.timesheetNumber && (weakInputNames.get(normalizeFullName(record.fullName)) || []).length > 1) errors.push('ФИО повторяется в файле без Employee ID или табельного номера.');
+
+      const exactId = record.employeeId ? (byId.get(record.employeeId) || []) : [];
+      const exactNumber = record.timesheetNumber ? (byNumber.get(record.timesheetNumber) || []) : [];
+      const exactName = record.fullName ? (byName.get(normalizeFullName(record.fullName)) || []) : [];
+      let matches = exactId.length ? exactId : (exactNumber.length ? exactNumber : exactName);
+      matches = unique(matches.map(employee => employee.employeeId)).map(id => employees.find(employee => employee.employeeId === id));
+      if (matches.length > 1) errors.push('Найдено несколько сотрудников с таким идентификатором или ФИО.');
+      const before = matches.length === 1 ? matches[0] : null;
+      if (before && record.employeeId && record.employeeId !== before.employeeId && !exactId.length) errors.push(`Employee ID из файла не совпадает с найденной записью ${before.employeeId}.`);
+      if (before && record.fullName && normalizeFullName(record.fullName) !== normalizeFullName(before.fullName) && exactId.length) warnings.push('ФИО отличается от текущей записи и будет обновлено.');
+      if (before?.status === 'Уволен' && record.status === 'Работает') errors.push('Файл пытается вернуть уволенного сотрудника в действующие. Выполните это вручную после проверки.');
+      if (record.status && !['Работает', 'Уволен', 'Декрет'].includes(record.status)) errors.push(`Неизвестный статус сотрудника: ${record.status}.`);
+
+      const preferredId = record.employeeId && !reservedIds.has(record.employeeId) ? record.employeeId : '';
+      const employeeId = before?.employeeId || preferredId || nextEmployeeId();
+      if (preferredId) reservedIds.add(preferredId);
+      const incoming = Object.fromEntries(Object.entries(record).filter(([, value]) => importedValue(value)));
+      const after = enrichEmployee({
+        ...(before || {}),
+        ...incoming,
+        employeeId,
+        fullName: record.fullName,
+        surname: record.surname,
+        name: record.name,
+        patronymic: record.patronymic,
+        status: record.status || before?.status || 'Работает',
+        fte: importedValue(record.fte) ? record.fte : (before?.fte ?? 1),
+        timesheetIncluded: importedValue(record.timesheetIncluded) ? record.timesheetIncluded : (before?.timesheetIncluded ?? true),
+        updatedAt: before?.updatedAt || ''
+      });
+      if (after.timesheetIncluded === false && !after.timesheetExclusionReason) after.timesheetExclusionReason = 'Импорт кадрового реестра';
+      if (after.timesheetIncluded === false && after.timesheetExclusionStatus !== 'Подтверждено') after.timesheetExclusionStatus = 'Требует подтверждения';
+      if (!after.department) warnings.push('Не заполнено подразделение.');
+      if (!after.position) warnings.push('Не заполнена должность.');
+      if (!after.hireDate) warnings.push('Не заполнена дата приема.');
+      if (after.status === 'Уволен' && !after.dismissalDate) warnings.push('Статус «Уволен» указан без даты увольнения.');
+      const changes = employeeChanges(before, after);
+      let action = errors.length ? (source.errors.length ? 'error' : 'conflict') : (!before ? 'create' : (!changes.length ? 'unchanged' : (before.status !== 'Уволен' && after.status === 'Уволен' ? 'dismiss' : 'update')));
+      return { rowKey: `row-${source.sourceRow}`, sourceRow: source.sourceRow, action, actionLabel: importActionLabel(action), employeeId, fullName: after.fullName, department: after.department, position: after.position, status: after.status, managerName: record.managerName || after.managerName || '', before, payload: after, changes, warnings, errors };
+    });
+
+    const managerCandidates = [...employees, ...items.filter(item => !item.errors.length).map(item => item.payload)];
+    const managerByName = groupedBy(managerCandidates, employee => normalizeFullName(employee.fullName));
+    items.forEach(item => {
+      if (item.errors.length || !item.managerName) return;
+      const candidates = unique((managerByName.get(normalizeFullName(item.managerName)) || []).map(manager => manager.employeeId)).filter(id => id !== item.employeeId);
+      if (candidates.length === 1) {
+        item.payload.managerId = candidates[0];
+        item.payload.managerName = item.managerName;
+      } else if (!candidates.length) item.warnings.push('Руководитель по ФИО не найден; поле оставлено без изменения.');
+      else item.warnings.push('Найдено несколько руководителей с таким ФИО; поле оставлено без изменения.');
+      item.changes = employeeChanges(item.before, item.payload);
+      if (item.action === 'unchanged' && item.changes.length) item.action = 'update';
+      item.actionLabel = importActionLabel(item.action);
+    });
+
+    const counts = items.reduce((result, item) => ({ ...result, [item.action]: (result[item.action] || 0) + 1 }), { create: 0, update: 0, dismiss: 0, unchanged: 0, conflict: 0, error: 0 });
+    return { fileName: clean(payload.fileName), sheetName: parsed.sheetName, headerRow: parsed.headerRow, mapping: parsed.mapping, columns: parsed.columns, totalRows: items.length, counts, items };
+  }
+
+  async function ensureImportedDirectories(items) {
+    const config = [{ field: 'department', type: 'Подразделение' }, { field: 'position', type: 'Должность' }, { field: 'location', type: 'Локация' }, { field: 'employmentType', type: 'Тип занятости' }, { field: 'workFormat', type: 'Формат работы' }];
+    const existing = await db.list('directory_items');
+    const existingKeys = new Set(existing.map(item => `${item.type}|${normalizeFullName(item.value)}`));
+    const additions = [];
+    config.forEach(({ field, type }) => unique(items.map(item => clean(item.payload[field]))).forEach(value => {
+      const key = `${type}|${normalizeFullName(value)}`;
+      if (value && !existingKeys.has(key)) {
+        existingKeys.add(key);
+        const row = { refId: nextId('REF-', [...existing, ...additions], 'refId'), type, value, parent: '', active: true, comment: 'Добавлено импортом сотрудников' };
+        additions.push(row);
+      }
+    }));
+    if (additions.length) await db.bulkPut('directory_items', additions.map(row => ({ recordId: row.refId, payload: row, indexes: indexFor('directory_items', row) })));
+    return additions.length;
+  }
+
+  async function commitEmployeeImport(actor, payload) {
+    await assertManage(actor);
+    const allowedActions = new Set(['create', 'update', 'dismiss']);
+    const items = (Array.isArray(payload.items) ? payload.items : []).filter(item => item.selected !== false && allowedActions.has(item.action) && !item.errors?.length);
+    if (!items.length) throw new Error('Не выбрана ни одна строка для импорта.');
+    const current = await allEmployees();
+    const currentById = new Map(current.map(employee => [employee.employeeId, employee]));
+    const now = new Date().toISOString();
+    const rows = items.map(item => {
+      const before = currentById.get(item.employeeId);
+      const employee = enrichEmployee({ ...(before || {}), ...item.payload, employeeId: item.employeeId, updatedAt: now, updatedBy: actor.email });
+      return { ...item, before, payload: employee, changes: employeeChanges(before, employee) };
+    });
+    for (let offset = 0; offset < rows.length; offset += 500) {
+      await db.bulkPut('employees', rows.slice(offset, offset + 500).map(item => ({ recordId: item.employeeId, payload: item.payload, indexes: indexFor('employees', item.payload) })));
+    }
+    const imports = await db.list('employee_imports');
+    const dateKey = todayIso().replace(/-/g, '');
+    const importId = nextId(`EMPIMP-${dateKey}-`, imports, 'importId');
+    const counts = rows.reduce((result, item) => ({ ...result, [item.action]: (result[item.action] || 0) + 1 }), { create: 0, update: 0, dismiss: 0 });
+    const importRow = { importId, fileName: clean(payload.fileName), sheetName: clean(payload.sheetName), rowCount: rows.length, created: counts.create, updated: counts.update, dismissed: counts.dismiss, skipped: Number(payload.skipped || 0), mapping: payload.mapping || {}, importedAt: now, importedBy: actor.email };
+    await save('employee_imports', importRow);
+    for (let offset = 0; offset < rows.length; offset += 500) {
+      await db.bulkPut('employee_import_rows', rows.slice(offset, offset + 500).map((item, index) => {
+        const row = { rowId: `${importId}-${String(offset + index + 1).padStart(5, '0')}`, importId, sourceRow: item.sourceRow, action: item.action, employeeId: item.employeeId, fullName: item.payload.fullName, changes: item.changes, warnings: item.warnings || [], importedAt: now, importedBy: actor.email };
+        return { recordId: row.rowId, payload: row, indexes: indexFor('employee_import_rows', row) };
+      }));
+    }
+    const directoriesAdded = await ensureImportedDirectories(rows);
+    return { ...importRow, directoriesAdded };
+  }
+
+  async function employeeImportHistory(actor) {
+    await assertManage(actor);
+    const imports = await db.list('employee_imports');
+    return { imports: imports.sort((a, b) => clean(b.importedAt).localeCompare(clean(a.importedAt))).slice(0, 20) };
   }
 
   async function dismissEmployee(actor, form) {
@@ -584,6 +761,10 @@ export function createHrApi(db) {
       case 'employees.get': return employeeCard(actor, payload.employeeId);
       case 'employees.save': return saveEmployee(actor, payload);
       case 'employees.dismiss': return dismissEmployee(actor, payload);
+      case 'employees.import.analyze': return analyzeEmployeeImport(actor, payload);
+      case 'employees.import.preview': return previewEmployeeImport(actor, payload);
+      case 'employees.import.commit': return commitEmployeeImport(actor, payload);
+      case 'employees.import.history': return employeeImportHistory(actor);
       case 'documents.save': return saveSimple(actor, 'documents', payload, { idField: 'documentId', prefix: 'DOC-', employee: true, manage: true });
       case 'quality.list': return quality(actor);
       case 'quality.resolve': { const rows = await db.list('review'); const row = rows.find(item => Number(item.rowNumber) === Number(payload.rowNumber)); if (row) { row.status = 'Решено'; row.comment = payload.comment; await save('review', row); } return row || {}; }
@@ -601,7 +782,7 @@ export function createHrApi(db) {
       case 'learning.save': return saveSimple(actor, 'learning', payload, { idField: 'learningId', prefix: 'LRN-', employee: true });
       case 'surveys.list': return surveys(actor);
       case 'surveys.save': return saveSimple(actor, 'surveys', { ...payload, anonymous: yes(payload.anonymous), enps: num(payload.enps), engagement: num(payload.engagement) }, { idField: 'responseId', prefix: 'RSP-', width: 5, employee: !yes(payload.anonymous) });
-      case 'surveys.sync': return { imported: 0, skipped: 0, errors: ['В версии 2.1 внешний источник подключается через Layero Data API.'] };
+      case 'surveys.sync': return { imported: 0, skipped: 0, errors: ['В версии 2.2 внешний источник подключается через Layero Data API.'] };
       case 'timesheet.get': return getTimesheet(actor, payload);
       case 'timesheet.prepare': return prepareTimesheet(actor, payload);
       case 'timesheet.saveBatch': return saveTimesheetEntries(actor, payload);

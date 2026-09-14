@@ -73,6 +73,8 @@ const directoryValues = {
 
 const records = {
   employees,
+  employee_imports: [],
+  employee_import_rows: [],
   roles: [
     { email: 'hrd@example.test', role: 'HRD', employeeId: '', active: true, comment: 'Администратор предпросмотра' },
     { email: 'hr@example.test', role: 'HR', employeeId: '', active: true, comment: 'HR' },
@@ -80,7 +82,7 @@ const records = {
     { email: 'timesheet@example.test', role: 'Табельщик', employeeId: '', active: true, comment: 'Табельщик подразделения' }
   ],
   settings: [
-    { parameter: 'Версия системы', value: '2.1.0', comment: 'Не редактировать', usage: 'Система' },
+    { parameter: 'Версия системы', value: '2.2.0', comment: 'Не редактировать', usage: 'Система' },
     { parameter: 'Цель eNPS', value: '40', comment: 'Зеленая зона', usage: 'Опросы' },
     { parameter: 'Испытательный срок по умолчанию, дней', value: '90', comment: 'Если для должности не задан иной срок', usage: 'Сотрудники' },
     { parameter: 'Порог расхождения часов', value: '0.5', comment: 'Минимальная разница для сверки СКУД', usage: 'Табель' }
@@ -128,5 +130,5 @@ const records = {
   offer_events: []
 };
 
-export const SEED_VERSION = '2.1.0';
+export const SEED_VERSION = '2.2.0';
 export const previewSeed = records;

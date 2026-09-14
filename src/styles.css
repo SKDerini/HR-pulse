@@ -225,6 +225,23 @@
   .offer-toolbar > div > small { display: block; margin-top: 4px; color: var(--muted); }
   .inline-filter { display: grid; grid-template-columns: auto minmax(150px, 210px); gap: 9px; align-items: center; color: var(--muted); font-size: 12px; font-weight: 750; }
   .offer-table { min-width: 1320px !important; }
+  .import-source { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: #fafafa; }
+  .import-source strong { overflow-wrap: anywhere; }
+  .import-source span { color: var(--muted); font-size: 12px; text-align: right; }
+  .import-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 10px; }
+  .import-safety { margin-bottom: 12px; padding: 10px 12px; border-left: 3px solid var(--orange); background: var(--orange-soft); }
+  .employee-import-preview-table { max-height: 52vh; border: 1px solid var(--line); border-radius: 10px; }
+  .employee-import-preview-table .data-table { min-width: 1120px; }
+  .employee-import-preview-table th:first-child, .employee-import-preview-table td:first-child { width: 42px; text-align: center; }
+  .employee-import-preview-table input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--red); }
+  .import-row-error td, .import-row-conflict td { background: #fffafa; }
+  .import-row-dismiss td { background: #fffdfd; }
+  .import-changes { min-width: 260px; font-size: 11px; line-height: 1.45; }
+  .import-changes strong { font-weight: 800; }
+  .import-message { max-width: 310px; margin: 3px 0; font-size: 11px; line-height: 1.35; }
+  .import-message.error { color: var(--red); font-weight: 750; }
+  .import-message.warning { color: #9a5a00; }
+  .employee-import-history { min-width: 760px !important; }
   .offer-amount-editor { display: grid; grid-template-columns: 110px auto; gap: 5px 7px; align-items: center; }
   .offer-amount-editor .btn { grid-column: 1 / -1; }
   .row-actions { display: flex; flex-wrap: wrap; gap: 6px; min-width: 250px; }

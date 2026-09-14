@@ -47,7 +47,8 @@
     timesheetDepartment: '',
     timesheetTab: 'calendar',
     timesheetEdits: {},
-    offerStatus: ''
+    offerStatus: '',
+    employeeImport: null
   };
 
   const $ = selector => document.querySelector(selector);
@@ -224,6 +225,7 @@
         <section class="panel"><div class="panel-head"><h2>Адаптация: риски</h2><span class="badge gray">модуль неактивен</span></div><div class="panel-body">${renderRiskList(data.adaptationRisks || [])}</div></section>
         <section class="panel"><div class="panel-head"><h2>Быстрые действия</h2></div><div class="panel-body"><div class="quick-actions">
           ${state.permissions.canManageOffers ? `<button class="quick-action" data-action="offer:new"><span class="qa-icon">₽</span><span>Новый оффер</span></button>` : ''}
+          ${state.permissions.canEditEmployees ? `<button class="quick-action" data-action="employee:import"><span class="qa-icon">⇩</span><span>Импорт сотрудников</span></button>` : ''}
           <button class="quick-action" data-nav="timesheet"><span class="qa-icon">▦</span><span>Открыть табель</span></button>
         </div></div></section>
         <section class="panel"><div class="panel-head"><h2>Последние кадровые события</h2><span class="badge gray">модуль неактивен</span></div><div class="panel-body">${renderEventList(data.events || [])}</div></section>
@@ -301,7 +303,7 @@
     const canEdit = !!state.permissions.canEditEmployees;
     state.cache.employeesPage = data;
     pageRoot.innerHTML = `
-      ${pageHead('Сотрудники', 'Единый исторический реестр', canEdit ? `<button class="btn primary" data-action="employee:new">＋ Новый сотрудник</button>` : '')}
+      ${pageHead('Сотрудники', 'Единый исторический реестр', canEdit ? `<button class="btn" data-action="employee:import">⇩ Импорт</button><button class="btn primary" data-action="employee:new">＋ Новый сотрудник</button>` : '')}
       <div class="stats-grid" style="grid-template-columns:repeat(4,minmax(160px,1fr))">
         ${statCard('Всего в истории', data.stats.total, '◉')}${statCard('Работают', data.stats.working, '✓', '', true)}${statCard('Уволены', data.stats.dismissed, '↪')}${statCard('На ИС', data.stats.probation, '⌛')}
       </div>
@@ -808,6 +810,124 @@
     bindSubmit('employeeForm', 'employees.save', async result => { await refreshBootstrapReferences(); navigate('employee', result.employeeId); });
   }
 
+  function employeeImportHistoryTable(items) {
+    if (!items.length) return `<div class="empty-state compact"><strong>Импортов еще не было</strong>После первой загрузки здесь появится журнал.</div>`;
+    return `<div class="table-wrap"><table class="data-table compact employee-import-history"><thead><tr><th>Дата</th><th>Файл</th><th>Создано</th><th>Обновлено</th><th>Уволено</th><th>Пользователь</th></tr></thead><tbody>${items.map(item => `<tr><td>${dateRu(item.importedAt)}</td><td class="cell-title">${escapeHtml(item.fileName || '—')}<small>${escapeHtml(item.sheetName || '')}</small></td><td>${escapeHtml(item.created || 0)}</td><td>${escapeHtml(item.updated || 0)}</td><td>${escapeHtml(item.dismissed || 0)}</td><td>${escapeHtml(item.importedBy || '—')}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+
+  async function openEmployeeImportForm() {
+    const history = await api('employees.import.history');
+    const content = `<form id="employeeImportFileForm" class="form-grid">
+      ${section('Файл кадрового реестра', true)}
+      <div class="field full"><label>Excel или CSV *</label><input class="form-control" name="employeeFile" type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" required></div>
+      <div class="hint full">Файл должен содержать ФИО либо отдельные колонки «Фамилия» и «Имя». Для надежного обновления добавьте Employee ID или табельный номер. Статус «Уволен» определяется по дате увольнения или колонке статуса. Отсутствие сотрудника в файле само по себе не считается увольнением.</div>
+      <div class="form-actions"><button type="button" class="btn" data-action="modal:close">Отмена</button><button type="submit" class="btn primary">Прочитать файл</button></div>
+    </form><h3 class="subhead">Последние импорты</h3>${employeeImportHistoryTable(history.imports || [])}`;
+    openModal('Импорт сотрудников', content, 'wide');
+    const form = $('#employeeImportFileForm');
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const file = form.elements.employeeFile.files[0];
+      if (!file) return toast('Выберите файл.', 'error');
+      if (!/\.(xlsx|xls|csv)$/i.test(file.name)) return toast('Поддерживаются файлы .xlsx, .xls и .csv.', 'error');
+      if (file.size > 20 * 1024 * 1024) return toast('Файл больше 20 МБ. Разделите его на несколько частей.', 'error', 7000);
+      const button = form.querySelector('[type=submit]'); const oldText = button.textContent;
+      button.disabled = true; button.textContent = 'Читаем…';
+      try {
+        const base64 = await fileToDataUrl(file);
+        const analysis = await api('employees.import.analyze', { fileName: file.name, base64 });
+        state.employeeImport = { fileName: file.name, base64, analysis, preview: null };
+        renderEmployeeImportMapping();
+      } catch (error) { toast(errorMessage(error), 'error', 8000); button.disabled = false; button.textContent = oldText; }
+    });
+  }
+
+  function employeeImportMappingField(field, analysis) {
+    const selected = analysis.suggestedMapping?.[field.key] || '';
+    return `<div class="field"><label>${escapeHtml(field.label)}</label><select class="form-control" name="map__${escapeAttr(field.key)}"><option value="">Не загружать</option>${(analysis.columns || []).map(column => `<option value="${escapeAttr(column.key)}" ${column.key === selected ? 'selected' : ''}>${escapeHtml(column.label)}${column.sample ? ` — ${escapeHtml(column.sample).slice(0, 35)}` : ''}</option>`).join('')}</select></div>`;
+  }
+
+  function renderEmployeeImportMapping() {
+    const current = state.employeeImport;
+    if (!current) return openEmployeeImportForm();
+    const analysis = current.analysis;
+    const primary = ['employeeId', 'timesheetNumber', 'fullName', 'surname', 'name', 'patronymic'];
+    const work = ['department', 'position', 'location', 'hireDate', 'plannedStartDate', 'startDate', 'dismissalDate', 'status', 'dismissalReason', 'managerName'];
+    const extra = ['email', 'phone', 'employmentType', 'workFormat', 'fte', 'timesheetIncluded'];
+    const byKey = key => analysis.fields.find(field => field.key === key);
+    const fields = keys => keys.map(key => byKey(key)).filter(Boolean).map(field => employeeImportMappingField(field, analysis)).join('');
+    const content = `<form id="employeeImportMappingForm" class="form-grid">
+      <div class="import-source full"><strong>${escapeHtml(current.fileName)}</strong><span>Лист: ${escapeHtml(analysis.sheetName)} · заголовок: строка ${escapeHtml(analysis.headerRow)} · строк данных: ${escapeHtml(analysis.sourceRows)}</span></div>
+      ${section('Сопоставление сотрудника', true)}${fields(primary)}
+      ${section('Работа в компании')}${fields(work)}
+      ${section('Дополнительные поля')}${fields(extra)}
+      <div class="hint full">Пустые ячейки не стирают существующие данные. Перед записью система покажет все изменения и конфликты. Дубли Employee ID, табельного номера или ФИО без идентификатора не импортируются.</div>
+      <div class="form-actions"><button type="button" class="btn" id="employeeImportChooseAnother">Другой файл</button><button type="submit" class="btn primary">Проверить изменения</button></div>
+    </form>`;
+    openModal('Сопоставление колонок', content, 'wide');
+    $('#employeeImportChooseAnother').addEventListener('click', openEmployeeImportForm);
+    const form = $('#employeeImportMappingForm');
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const values = formData(form); const mapping = {};
+      Object.entries(values).filter(([key]) => key.startsWith('map__')).forEach(([key, value]) => { mapping[key.slice(5)] = value; });
+      if (!mapping.fullName && !(mapping.surname && mapping.name)) return toast('Сопоставьте ФИО либо Фамилию и Имя.', 'error', 7000);
+      const button = form.querySelector('[type=submit]'); const oldText = button.textContent;
+      button.disabled = true; button.textContent = 'Сверяем…';
+      try {
+        const preview = await api('employees.import.preview', { fileName: current.fileName, base64: current.base64, sheetName: analysis.sheetName, mapping });
+        state.employeeImport = { ...current, mapping, preview };
+        renderEmployeeImportPreview();
+      } catch (error) { toast(errorMessage(error), 'error', 9000); button.disabled = false; button.textContent = oldText; }
+    });
+  }
+
+  function employeeImportActionBadge(item) {
+    const cls = item.action === 'create' ? 'green' : item.action === 'dismiss' || item.action === 'error' ? 'red' : item.action === 'update' ? 'blue' : item.action === 'conflict' ? 'orange' : 'gray';
+    return `<span class="badge ${cls}">${escapeHtml(item.actionLabel)}</span>`;
+  }
+
+  function renderEmployeeImportPreview() {
+    const current = state.employeeImport;
+    const preview = current?.preview;
+    if (!preview) return renderEmployeeImportMapping();
+    const selectable = new Set(['create', 'update', 'dismiss']);
+    const table = `<div class="table-wrap employee-import-preview-table"><table class="data-table compact"><thead><tr><th><input id="employeeImportSelectAll" type="checkbox" checked aria-label="Выбрать все допустимые строки"></th><th>Строка</th><th>Действие</th><th>Сотрудник</th><th>Подразделение / должность</th><th>Изменения</th><th>Проверка</th></tr></thead><tbody>${preview.items.map(item => {
+      const allowed = selectable.has(item.action) && !item.errors.length;
+      const messages = [...(item.errors || []).map(message => `<div class="import-message error">${escapeHtml(message)}</div>`), ...(item.warnings || []).map(message => `<div class="import-message warning">${escapeHtml(message)}</div>`)].join('');
+      const changes = (item.changes || []).slice(0, 5).map(change => `<div><strong>${escapeHtml(change.label)}</strong>: ${orDash(change.before)} → ${orDash(change.after)}</div>`).join('');
+      return `<tr class="import-row-${escapeAttr(item.action)}"><td><input class="employee-import-select" type="checkbox" data-row-key="${escapeAttr(item.rowKey)}" ${allowed ? 'checked' : 'disabled'}></td><td>${escapeHtml(item.sourceRow)}</td><td>${employeeImportActionBadge(item)}</td><td class="cell-title">${escapeHtml(item.fullName)}<small>${escapeHtml(item.employeeId)}</small></td><td>${orDash(item.department)}<small>${orDash(item.position)}</small></td><td class="import-changes">${changes || '—'}${(item.changes || []).length > 5 ? `<small>Еще изменений: ${(item.changes || []).length - 5}</small>` : ''}</td><td>${messages || '<span class="badge green">Проверено</span>'}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+    const content = `<div class="import-source"><strong>${escapeHtml(preview.fileName)}</strong><span>${escapeHtml(preview.sheetName)} · обработано строк: ${escapeHtml(preview.totalRows)}</span></div>
+      <div class="import-summary"><span class="badge green">Создать: ${preview.counts.create}</span><span class="badge blue">Обновить: ${preview.counts.update}</span><span class="badge red">Уволить: ${preview.counts.dismiss}</span><span class="badge gray">Без изменений: ${preview.counts.unchanged}</span><span class="badge orange">Проверить: ${preview.counts.conflict}</span><span class="badge red">Ошибки: ${preview.counts.error}</span></div>
+      <div class="hint import-safety">Изменения еще не записаны. Строки с ошибками и конфликтами заблокированы. Снимите флажок с любой допустимой строки, которую не нужно загружать.</div>
+      ${table}
+      <div class="form-actions"><button type="button" class="btn" id="employeeImportBackToMapping">Назад к колонкам</button><span id="employeeImportSelectedCount"></span><button type="button" class="btn primary" id="employeeImportCommit">Записать выбранные строки</button></div>`;
+    openModal('Предварительная проверка импорта', content, 'wide');
+    const checks = () => Array.from(document.querySelectorAll('.employee-import-select:not(:disabled)'));
+    const updateCount = () => { const selected = checks().filter(input => input.checked).length; $('#employeeImportSelectedCount').textContent = `Выбрано: ${selected}`; $('#employeeImportCommit').disabled = selected === 0; };
+    $('#employeeImportSelectAll').addEventListener('change', event => { checks().forEach(input => { input.checked = event.target.checked; }); updateCount(); });
+    checks().forEach(input => input.addEventListener('change', () => { $('#employeeImportSelectAll').checked = checks().every(item => item.checked); updateCount(); }));
+    $('#employeeImportBackToMapping').addEventListener('click', renderEmployeeImportMapping);
+    $('#employeeImportCommit').addEventListener('click', async event => {
+      const button = event.currentTarget; const oldText = button.textContent;
+      const selectedKeys = new Set(checks().filter(input => input.checked).map(input => input.dataset.rowKey));
+      const items = preview.items.map(item => ({ ...item, selected: selectedKeys.has(item.rowKey) }));
+      if (!selectedKeys.size) return;
+      if (!window.confirm(`Записать выбранные строки: ${selectedKeys.size}? Перед импортом рекомендуется скачать резервную копию базы.`)) return;
+      button.disabled = true; button.textContent = 'Записываем…';
+      try {
+        const result = await api('employees.import.commit', { fileName: preview.fileName, sheetName: preview.sheetName, mapping: current.mapping, skipped: preview.totalRows - selectedKeys.size, items });
+        state.employeeImport = null; state.cache.employeeList = null; state.cache.employeesPage = null;
+        await refreshBootstrapReferences();
+        closeModal();
+        toast(`Импорт завершен: создано ${result.created}, обновлено ${result.updated}, уволено ${result.dismissed}.`, 'success', 9000);
+        await renderRoute();
+      } catch (error) { toast(errorMessage(error), 'error', 9000); button.disabled = false; button.textContent = oldText; }
+    });
+    updateCount();
+  }
+
   function datalistField(name, label, list, value = '', required = false) {
     const id = `${name}List`;
     return `<div class="field"><label>${escapeHtml(label)}</label><input class="form-control" name="${escapeAttr(name)}" value="${escapeAttr(value || '')}" list="${id}" ${required ? 'required' : ''}><datalist id="${id}">${(list || []).map(v => `<option value="${escapeAttr(v)}"></option>`).join('')}</datalist></div>`;
@@ -1062,6 +1182,7 @@
       return;
     }
     if (action === 'employee:new') return openEmployeeForm();
+    if (action === 'employee:import') return openEmployeeImportForm();
     if (action === 'employee:edit' || action === 'quality:edit') { const card = await api('employees.get', { employeeId: button.dataset.id }); return openEmployeeForm(card.profile); }
     if (action === 'employee:dismiss') return openDismissForm(button.dataset.id);
     if (action === 'document:new') return openDocumentForm(null, button.dataset.id);

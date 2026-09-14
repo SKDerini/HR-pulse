@@ -1,7 +1,7 @@
 {
-  "name": "hr-stroyakov-v2-1-layero",
+  "name": "hr-stroyakov-v2-2-layero",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
   "engines": {
     "node": ">=22"

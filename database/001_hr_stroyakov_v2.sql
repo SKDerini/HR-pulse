@@ -1,4 +1,4 @@
--- HR Строяков 2.1 для Layero PostgreSQL / Data API.
+-- HR Строяков 2.2 для Layero PostgreSQL / Data API.
 -- Выполняется один раз в SQL-редакторе базы Layero.
 
 begin;
@@ -32,6 +32,8 @@ create index if not exists hr_records_offers_date_idx on app.hr_records((payload
 create index if not exists hr_records_offers_employee_idx on app.hr_records(employee_id) where entity = 'offers';
 create index if not exists hr_records_offer_versions_idx on app.hr_records((payload ->> 'offerId'), (payload ->> 'versionNumber')) where entity = 'offer_motivation_versions';
 create unique index if not exists hr_records_offer_version_unique_idx on app.hr_records((payload ->> 'offerId'), (payload ->> 'versionNumber')) where entity = 'offer_motivation_versions';
+create index if not exists hr_records_employee_imports_date_idx on app.hr_records((payload ->> 'importedAt')) where entity = 'employee_imports';
+create index if not exists hr_records_employee_import_rows_idx on app.hr_records((payload ->> 'importId'), employee_id) where entity = 'employee_import_rows';
 
 create table if not exists app.hr_user_roles (
   email text primary key,
@@ -188,7 +190,7 @@ declare
 begin
   if current_role is null then return false; end if;
   if current_role in ('HR', 'HRD') then return true; end if;
-  if p_entity in ('offers', 'offer_motivation_versions', 'offer_events') then return false; end if;
+  if p_entity in ('offers', 'offer_motivation_versions', 'offer_events', 'employee_imports', 'employee_import_rows') then return false; end if;
   if p_entity = 'roles' then return lower(p_email) = app.jwt_email(); end if;
   if p_entity in ('directory_items', 'settings', 'adaptation_templates', 'work_calendar', 'timesheet_codes') then return true; end if;
   if current_role = 'Табельщик' then
@@ -402,7 +404,7 @@ grant execute on function api.hr_submit_survey(text, jsonb) to layero.role('auth
 -- Безопасные базовые записи. Пользовательские HR-данные скрипт не создает.
 insert into app.hr_records(entity, record_id, payload)
 values
-  ('settings', 'Версия системы', '{"parameter":"Версия системы","value":"2.1.0","comment":"Не редактировать","usage":"Система"}'::jsonb),
+  ('settings', 'Версия системы', '{"parameter":"Версия системы","value":"2.2.0","comment":"Не редактировать","usage":"Система"}'::jsonb),
   ('settings', 'Цель eNPS', '{"parameter":"Цель eNPS","value":"40","comment":"Зеленая зона","usage":"Опросы"}'::jsonb),
   ('timesheet_codes', 'Я', '{"code":"Я","name":"Явка","category":"Явка","color":"#FFF2CC","defaultHours":8,"requiresDocument":false,"active":true,"order":10}'::jsonb),
   ('timesheet_codes', 'В', '{"code":"В","name":"Выходной","category":"Выходной","color":"#FFFFFF","defaultHours":0,"requiresDocument":false,"active":true,"order":20}'::jsonb),
@@ -414,7 +416,7 @@ values
 on conflict(entity, record_id) do nothing;
 
 update app.hr_records
-set payload = jsonb_set(payload, '{value}', '"2.1.0"'::jsonb), updated_at = now()
+set payload = jsonb_set(payload, '{value}', '"2.2.0"'::jsonb), updated_at = now()
 where entity = 'settings' and record_id = 'Версия системы';
 
 commit;
