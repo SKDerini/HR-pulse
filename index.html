@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="HR-система Строяков: сотрудники, адаптация, подбор, опросы и табель рабочего времени.">
+  <title>HR Строяков 2.1</title>
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <button id="mobileMenuButton" class="icon-button mobile-menu" type="button" aria-label="Открыть меню">☰</button>
+      <div class="brand" aria-label="Строяков">
+        <div class="brand-main">СТР<span>О</span>ЯКОВ</div>
+        <div class="brand-sub">МЫ СНАБЖАЕМ</div>
+      </div>
+      <div class="topbar-spacer"></div>
+      <button id="databaseButton" class="btn runtime-button" type="button" hidden>База предпросмотра</button>
+      <div id="connectionBadge" class="connection-badge"><span class="status-dot"></span><span>Подключение…</span></div>
+      <button id="notificationButton" class="notification-button" type="button" data-action="notifications:open" aria-label="Уведомления" hidden>🔔<span id="notificationCount">0</span></button>
+      <div id="actorCard" class="actor-card">
+        <div class="avatar">HR</div>
+        <div><strong>HR-система</strong><small>Загрузка профиля…</small></div>
+      </div>
+    </header>
+
+    <aside id="sidebar" class="sidebar">
+      <nav id="mainNav" class="main-nav" aria-label="Основное меню"></nav>
+      <div class="sidebar-foot">
+        <strong>Мы снабжаем</strong>
+        <span>успехом каждый<br>ваш проект!</span>
+        <div class="hardhat" aria-hidden="true">◜</div>
+      </div>
+    </aside>
+
+    <main id="main" class="main-content">
+      <div id="globalAlert" class="global-alert" role="alert" hidden></div>
+      <div id="pageRoot" class="page-root" aria-live="polite">
+        <div class="initial-loader"><div class="spinner"></div><strong>Подключаем базу данных…</strong><span>Проверяем структуру и права доступа</span></div>
+      </div>
+    </main>
+  </div>
+
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root" aria-live="polite"></div>
+  <div id="runtimeRoot"></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
